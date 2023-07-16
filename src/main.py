@@ -132,4 +132,4 @@ def main(argv: list[str]) -> None:
         crypt.make_key_file()
 
 if __name__ == "__main__":
-    main(sys.argv)
+    main(sys.argv) # feeling fancy :)
