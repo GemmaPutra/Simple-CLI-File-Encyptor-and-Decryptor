@@ -1,49 +1,59 @@
 import sys
 import pathlib
-from encryptfile import FileCrypter
-from encryptfolder import FolderCrypter
-from passphrase import phrase_key
-from maid import CryptMethod, save_index
 
-help_prompt = """\
-crypt METHOD {[-h | --help] | {[-k | --key] KEY}} *FILES
+import maid
+from crypter import FilesCrypter, wordkey, filecrypt
+from maid import  FailedReason, CryptMethod, save_index
+
+
+common_help = """\
+METHOD
 
 arguments :
-    METHOD - either 'encrypt' or 'decrypt'
-    KEY    - the key provided can be a word or a file that contain a key
-    FILES  - can be an array of files, single folder or a single file
+METHOD - encrypt (-e) or decrypt (-d)
+"""
+method_help = """\
+{} [-k | --key KEY_FILE | KEY] | [FOLDER | *FILES]
 
-options   :
-    [-h | --help] - help options
-    [-k | --key]  - key input options
+argument :
+KEY_FILE | KEY - key or file contain key
+FOLDER | FILES - folder path or any amount of files
+
+options  :
+-k | --key     - key flag to indicate inserting a key, the key can be a word or actual key
 """
 
-def main() -> None:
-    _, *args = sys.argv
-    help_opt = "-h", "--help"
-    method = None
-    crypter = None
-    path = None
-    paths = None
-    key = None
-    key_indexes = None
-    decrypter_res = []
-    decryptor_ending = "\n"
 
-    if any(hc in args for hc in help_opt):
-        print(help_prompt)
-        quit(-1)
+def main(argv: list[str]) -> None:
+    help_prompt = ["-h", "--help"]
+    crypt_method = None
+    key_indexes = None
+    key = None
+    crypt = None
+    files_path = None
+
+    _, *args = argv
+
+    if not args or args[0] in help_prompt:
+        print(common_help)
+        quit(0)
 
     match args:
         case ["encrypt" | "-e", *args]:
-            method = CryptMethod.Encrypt
+            if args[0] in help_prompt:
+                print(method_help.format("encrypt"))
+                quit(0)
+
+            crypt_method = CryptMethod.Encrypt
         case ["decrypt" | "-d", *args]:
-            method = CryptMethod.Decrypt
-        case []:
-            print(help_prompt)
-            quit(-1)
+            if args[0] in help_prompt:
+                print(method_help.format("decrypt"))
+                quit(0)
+
+            crypt_method = CryptMethod.Decrypt
         case _:
-            print("wrong argument")
+            print("method is required")
+            quit(-1)
 
     if save_index(args, "-k") >= 0 and save_index(args, "--key") >= 0:
         print("use one options at a time")
@@ -55,114 +65,71 @@ def main() -> None:
 
     if key_indexes is not None:
         try:
-            _, key = args.pop(key_indexes), args.pop(key_indexes)
+            _, keyp = args.pop(key_indexes), args.pop(key_indexes)
         except IndexError as _:
             print("provide some argument to option")
             quit(0)
 
-        kpath = pathlib.Path(key).absolute()
-
-        if kpath.exists():
-            with kpath.open("rb") as kp:
-                if not kp.readable():
-                    print("file cannot be opened")
-                    quit(0)
-                key = kp.read()
-        else:
-            key = phrase_key(key)
+        try:
+            key = FilesCrypter.key_from_file(pathlib.Path(keyp).absolute())
+        except maid.NotAFileObject as _:
+            print("path is not a file")
+            quit(-1)
+        except maid.EmptyKeyFile as _:
+            print("file is empty")
+            quit(-1)
+        except FileNotFoundError as _:
+            key = wordkey(keyp)
 
     if not args:
-        print("lack argument at least 1 or more")
-        quit(0)
+        print("empty argument")
+        quit(-1)
+
+    if len(args) == 1:
+        path = pathlib.Path(args[-1]).absolute()
+
+        if path.is_dir() and path.exists():
+            files_path = tuple([f.absolute() for f in path.iterdir() if f.is_file()])
+        else:
+            files_path = path,
+    else:
+        files_path = tuple([pathlib.Path(f).absolute() for f in args])
 
     try:
-        if len(args) == 1:
-            path = pathlib.Path(args[0]).absolute()
+        with filecrypt(key) as crypter:
+            for file in files_path:
+                crypter.files = file
 
-            if not path.exists():
-                print("file does not exist")
-                quit(0)
+            match crypt_method:
+                case CryptMethod.Encrypt:
+                    crypter.encrypt()
+                case CryptMethod.Decrypt:
+                    crypter.decrypt()
 
-            if path.is_dir():
-                crypter = FolderCrypter(path, key=key)
+            crypt = crypter
+    except maid.NotAPathObject as _:
+        print("broken scripts :(")
+        quit(-1)
+    except FileNotFoundError as _:
+        print("there is a file that doesn't exist")
+        quit(-1)
+    except maid.NotAFileObject as _:
+        print("some path is not valid file")
+        quit(-1)
+    finally:
+        for failed_file in crypt.failed_files.items():
+            match failed_file:
+                case [file, FailedReason.NonReadable]:
+                    print(f"{file.name!r} is not readable")
+                case [file, FailedReason.NonWritable]:
+                    print(f"{file.name!r} is not writable")
+                case [file, FailedReason.EmptyFile]:
+                    print(f"{file.name!r} is empty")
+                case [file, FailedReason.InvalidKeyOrUnencrypted]:
+                    print(f"{file.name!r} is might be unencrypted yet or using invalid key")
 
-                if not (files := [f_ for f_ in path.iterdir() if f_.is_file()]):
-                    if method is CryptMethod.Encrypt:
-                        print(f"'{len(files)}' file succesfully encrypted")
-                    elif method is CryptMethod.Decrypt:
-                        print(f"'{len(files)}' file being decrypted")
-                    else:
-                        print("wrong method")
-                        quit(0)
-                    quit(1)
-            else:
-                crypter = FileCrypter(key)
-        elif len(args) > 1:
-            paths = [pathlib.Path(file_) for file_ in args]
-
-            if any(not f_.exists() for f_ in paths):
-                print(paths)
-                print("there is a file that does not exist")
-                quit(0)
-            if any(f_.is_dir() for f_ in paths): # might implement this feature later on
-                print("cannot encrypt a folder with other files")
-                quit(0)
-
-            crypter = FolderCrypter(key=key)
-        else:
-            print("lack argument at least 1 or more")
-            quit(0)
-    except KeyError as _:
-        print("invalid key for encryption/decryption")
-        quit(0)
-
-    if method is CryptMethod.Encrypt:
-        if isinstance(crypter, FolderCrypter):
-            if paths is not None:
-                crypter.encrypt(*paths)
-
-                print(f"'{len(paths)}' file succesfully encrypted")
-            else:
-                print(f"'{len([f_ for f_ in path.iterdir() if f_.is_file()])}' file succesfully encrypted")
-                crypter.encrypt()
-        else:
-            crypter.encrypt(path)
-            print(f"'1' file succesfully encrypted")
-    elif method is CryptMethod.Decrypt:
-        if isinstance(crypter, FolderCrypter):
-            if paths is not None:
-                decrypter_res = crypter.decrypt(*paths)
-
-                if decrypter_res:
-                    decryptor_ending = ", "
-                print(f"'{len(paths) - len(decrypter_res)}' file succesfully decrypted", end=decryptor_ending)
-            else:
-                decrypter_res = crypter.decrypt()
-
-                if decrypter_res:
-                    decryptor_ending = ", "
-                print(f"'{len([f_ for f_ in path.iterdir() if f_.is_file()]) - len(decrypter_res)}' file succesfully decrypted", end=decryptor_ending)
-        else:
-            decrypter_res = crypter.decrypt(path)
-
-            if not decrypter_res:
-                decryptor_ending = ", "
-            print(f"'{1 if decrypter_res else 0}' file succesfully decrypted", end=decryptor_ending)
-
-            if not decrypter_res:
-                print("cannot decrypt '1' file(s), the files might be empty, use invalid key or the file has not been encrypted yet")
-    else:
-        print("wrong method")
-        quit(0)
-
-    if crypter.is_generated:
-        path = path if path is not None else paths[0]
-
-        key_file_path = path.parent
-        with key_file_path.with_name(f"key ({f'{path.name}' if paths is None else f'{path.name}, ...'}).txt").open("wb") as kfp:
-            kfp.write(crypter.key)
+    if crypt.is_generated:
+        crypt.make_key_file()
 
 if __name__ == "__main__":
-    main()
-
-# still have bug when decrypting multiple file, the prompt suggesting there is only one file and it won't decrypting it
+    main(sys.argv)
